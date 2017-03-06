@@ -5,21 +5,20 @@ import tensorflow as tf
 import shutil
 import collections
 import random
-import numpy
 
 # Game
 ENV_NAME = "Pendulum-v0"
 
 # NN
 DESCENT_RATE = 0.0001
-HID_DIMS = [20, 20]
-INIT_HID_COE = [(0, 1), (0, 1)] # Each tuple = (mean, stddev), same below
-INIT_HID_BIAS = [(0.02, 0), (0.02, 0)]
+HID_DIMS = [20]
+INIT_HID_COE = [(0, 1)] # Each tuple = (mean, stddev), same below
+INIT_HID_BIAS = [(0.02, 0)]
 INIT_ACTOUT_COE = (0, 1)
 INIT_ACTOUT_BIAS = (0.02, 0)
 INIT_VOUT_COE = (0, 1)
 INIT_VOUT_BIAS = (0.02, 0)
-INIT_L = (0, 1)
+INIT_L = (0, 5)
 
 # RL
 INIT_STDDEV = 0.67
@@ -27,36 +26,39 @@ FINAL_STDDEV = 0.01
 NET_VERSION_DIFF = 300
 GAMMA = 0.9
 EPISODE = 10000
-STEP = 300
+STEP = 200
 REPLAY_SIZE = 10000
 BATCH_SIZE = 32
+REWARD_ADDITION = 10
 
 # Test
 TEST_INTERVAL = 100
 TEST_CASES = 3
 
 # Summary
-SUMMARY_INTERVAL = 100
+SUMMARY_INTERVAL = 1000
 
 class Net:
     ''' Neural Network '''
 
-    def __init__(self, envDim, actDim):
-        ''' Constructor
+    @classmethod
+    def buildGraph(cls, envDim, actDim):
+        ''' All nets share one graph
+            Call this before construct objects
             @param envDim : dimension of environment input layer
             @param actDim : dimension of action output layer '''
 
-        layerBefore = self.envIn = tf.placeholder(tf.float32, (None, envDim))
+        layerBefore = cls.envIn = tf.placeholder(tf.float32, (None, envDim), name = 'envIn')
         for i in range(len(HID_DIMS)):
-            layerBefore = self._genLayer('layer' + str(i), layerBefore, HID_DIMS[i], INIT_HID_COE[i], INIT_HID_BIAS[i], True)
-        self.actOut = self._genLayer('actOut', layerBefore, actDim, INIT_ACTOUT_COE, INIT_ACTOUT_BIAS, False)
-        self.VOut = tf.reduce_sum(self._genLayer('VOut', layerBefore, 1, INIT_VOUT_COE, INIT_VOUT_BIAS, False), 1)
+            layerBefore = cls._genLayer('layer' + str(i), layerBefore, HID_DIMS[i], INIT_HID_COE[i], INIT_HID_BIAS[i], True)
+        cls.actOut = tf.nn.sigmoid(cls._genLayer('actOut', layerBefore, actDim, INIT_ACTOUT_COE, INIT_ACTOUT_BIAS, False)) # in (0, 1)
+        cls.VOut = tf.reduce_sum(cls._genLayer('VOut', layerBefore, 1, INIT_VOUT_COE, INIT_VOUT_BIAS, False), 1)
         del layerBefore
 
-        self.actIn = tf.placeholder(tf.float32, (None, actDim))
+        cls.actIn = tf.placeholder(tf.float32, (None, actDim), name = 'actIn')
 
         with tf.name_scope('alpha'):
-            alpha = self.actIn - self.actOut
+            alpha = cls.actIn - cls.actOut
 
         with tf.name_scope('L'):
             def genLElement(i, j):
@@ -79,20 +81,25 @@ class Net:
             tf.summary.histogram('histogram', A)
 
         with tf.name_scope('Q'):
-            self.QOut = -A + self.VOut
-            tf.summary.histogram('histogram', self.QOut)
+            cls.QOut = -A + cls.VOut
+            tf.summary.histogram('histogram', cls.QOut)
 
         with tf.name_scope('loss'):
-            self.QIn = tf.placeholder(tf.float32, (None))
-            diffs = self.QOut - self.QIn
+            cls.QIn = tf.placeholder(tf.float32, (None), name = 'QIn')
+            diffs = cls.QOut - cls.QIn
             loss = tf.reduce_mean(tf.square(diffs))
-            self.optimizer = tf.train.AdamOptimizer(DESCENT_RATE).minimize(loss)
+            cls.optimizer = tf.train.AdamOptimizer(DESCENT_RATE).minimize(loss)
 
             tf.summary.histogram('diffs', diffs)
             tf.summary.scalar('loss', loss)
 
+        cls.globalInit = tf.global_variables_initializer()
+
+    def __init__(self):
+        ''' Constructor '''
+
         self.sess = tf.Session()
-        self.sess.run(tf.global_variables_initializer())
+        self.sess.run(self.globalInit)
         self.trainCnt = 0
 
     def getAction(self, envTensors):
@@ -105,6 +112,7 @@ class Net:
 
         return self.sess.run(self.VOut, { self.envIn: envTensors })
 
+    # @profile
     def feed(self, sampledState, sampledAction, sampledQ):
         ''' Train '''
 
@@ -160,8 +168,9 @@ class Agent:
 
     def __init__(self, env):
         self.env = env
-        self.netNow = Net(env.observation_space.shape[0], env.action_space.shape[0])
-        self.netBefore = Net(env.observation_space.shape[0], env.action_space.shape[0])
+        Net.buildGraph(env.observation_space.shape[0], 2)
+        self.netNow = Net()
+        self.netBefore = Net()
         self.replay = collections.deque()
 
     def reset(self):
@@ -171,7 +180,6 @@ class Agent:
 
     def optAction(self):
         ''' Return optimized action from current state '''
-        # TODO: 返回的真的会在范围内吗？只有一维真的够吗？或许可以不以这个做直接输出
 
         return self.netNow.getAction((self.state, ))[0]
 
@@ -180,17 +188,17 @@ class Agent:
             @param completeness : current episode / total episode number '''
 
         opt = self.optAction()
-        disturb = lambda x: random.normalvariate(x, INIT_STDDEV + (FINAL_STDDEV - INIT_STDDEV) * completeness)
-        while True:
-            ret = numpy.array(list(map(disturb, opt)))
-            if self.env.action_space.contains(ret):
-                return ret
+        disturb = lambda x: min(1.0, max(0.0, random.normalvariate(x, INIT_STDDEV + (FINAL_STDDEV - INIT_STDDEV) * completeness)))
+        ret = list(map(disturb, opt))
+        return ret
 
+    # @profile
     def perceive(self, oldState, action, newState, reward, done):
         ''' Train '''
 
         if self.netBefore.trainCnt < self.netNow.trainCnt - NET_VERSION_DIFF:
             self.netNow.copyTo(self.netBefore) # Not updating continuously to stay stative
+            self.netBefore.trainCnt = self.netNow.trainCnt
         self.replay.append({
             'state': oldState,
             'action': action,
@@ -201,24 +209,28 @@ class Agent:
         batch = random.sample(self.replay, min(len(self.replay), BATCH_SIZE))
         self.netNow.feed([item['state'] for item in batch], [item['action'] for item in batch], [item['Q'] for item in batch])
 
+    # @profile
     def doAction(self, action, perceive):
         ''' Perform action
+            @param action : action vector (absolute impluse, probability to use positive impluse)
             @param perceive : boolean. Whether to perceive after performing action
             @return : (Reward gained, Whether done) '''
         
-        newState, reward, done, _ = self.env.step(action)
+        newState, reward, done, _ = self.env.step((2.0 * action[0] * (1 if random.random() < action[1] else -1), ))
         if perceive:
-            self.perceive(self.state, action, newState, reward, done)
+            self.perceive(self.state, action, newState, REWARD_ADDITION + reward, done)
         self.state = newState
         return (reward, done)
 
+# @profile
 def mainLoop(env, agent):
     ''' Main loop
         Left `env` and `agent` as parameters to make debugging easier '''
 
     for i in range(EPISODE + 1): # +1 to enable the last test
+        # print(i)
         agent.reset()
-        for j in range(STEP):
+        for _ in range(STEP):
             _, done = agent.doAction(agent.exploreExploitAction(float(i) / EPISODE), True)
             if done:
                 break
@@ -228,17 +240,12 @@ def mainLoop(env, agent):
             totReward = 0
             for _ in range(TEST_CASES):
                 agent.reset()
-                success = True
-                for j in range(STEP):
+                for _ in range(STEP):
                     # env.render()
                     reward, done = agent.doAction(agent.optAction(), False)
                     totReward += reward
                     if done:
-                        success = False
-                        print("  Failed in %s steps"%(j))
                         break
-                if success:
-                    print("  Success")
             avgReward = totReward / TEST_CASES
             print("In %d-th episode, avgReward = %f"%(i, avgReward))
 
