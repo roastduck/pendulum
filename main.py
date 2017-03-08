@@ -5,6 +5,7 @@ import tensorflow as tf
 import shutil
 import collections
 import random
+import math
 
 # Game
 ENV_NAME = "Pendulum-v0"
@@ -18,7 +19,7 @@ INIT_ACTOUT_COE = (0, 1)
 INIT_ACTOUT_BIAS = (0.02, 0)
 INIT_VOUT_COE = (0, 1)
 INIT_VOUT_BIAS = (0.02, 0)
-INIT_L = (0, 5)
+INIT_L = (0, 1)
 
 # RL
 INIT_STDDEV = 0.67
@@ -28,7 +29,7 @@ GAMMA = 0.9
 EPISODE = 10000
 STEP = 200
 REPLAY_SIZE = 10000
-BATCH_SIZE = 32
+BATCH_SIZE = 128
 REWARD_ADDITION = 10
 
 # Test
@@ -51,7 +52,7 @@ class Net:
         layerBefore = cls.envIn = tf.placeholder(tf.float32, (None, envDim), name = 'envIn')
         for i in range(len(HID_DIMS)):
             layerBefore = cls._genLayer('layer' + str(i), layerBefore, HID_DIMS[i], INIT_HID_COE[i], INIT_HID_BIAS[i], True)
-        cls.actOut = tf.nn.sigmoid(cls._genLayer('actOut', layerBefore, actDim, INIT_ACTOUT_COE, INIT_ACTOUT_BIAS, False)) # in (0, 1)
+        cls.actOut = cls._genLayer('actOut', layerBefore, actDim, INIT_ACTOUT_COE, INIT_ACTOUT_BIAS, False)
         cls.VOut = tf.reduce_sum(cls._genLayer('VOut', layerBefore, 1, INIT_VOUT_COE, INIT_VOUT_BIAS, False), 1)
         del layerBefore
 
@@ -216,7 +217,8 @@ class Agent:
             @param perceive : boolean. Whether to perceive after performing action
             @return : (Reward gained, Whether done) '''
         
-        newState, reward, done, _ = self.env.step((2.0 * action[0] * (1 if random.random() < action[1] else -1), ))
+        sigmoid = lambda x: 1.0 / (1.0 + math.exp(-x))
+        newState, reward, done, _ = self.env.step((2.0 * sigmoid(action[0] / 3) * (1 if random.random() < sigmoid(action[1] * 3) else -1), ))
         if perceive:
             self.perceive(self.state, action, newState, REWARD_ADDITION + reward, done)
         self.state = newState
@@ -228,7 +230,7 @@ def mainLoop(env, agent):
         Left `env` and `agent` as parameters to make debugging easier '''
 
     for i in range(EPISODE + 1): # +1 to enable the last test
-        # print(i)
+        print(i)
         agent.reset()
         for _ in range(STEP):
             _, done = agent.doAction(agent.exploreExploitAction(float(i) / EPISODE), True)
@@ -241,7 +243,7 @@ def mainLoop(env, agent):
             for _ in range(TEST_CASES):
                 agent.reset()
                 for _ in range(STEP):
-                    # env.render()
+                    env.render()
                     reward, done = agent.doAction(agent.optAction(), False)
                     totReward += reward
                     if done:
