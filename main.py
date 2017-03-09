@@ -12,14 +12,15 @@ ENV_NAME = "Pendulum-v0"
 
 # NN
 DESCENT_RATE = 0.0001
-HID_DIMS = [20]
-INIT_HID_COE = [(0, 1)] # Each tuple = (mean, stddev), same below
-INIT_HID_BIAS = [(0.02, 0)]
+HID_DIMS = [15, 30]
+INIT_HID_COE = [(0, 1)] * 2 # Each tuple = (mean, stddev), same below
+INIT_HID_BIAS = [(0.02, 0)] * 2
 INIT_ACTOUT_COE = (0, 1)
 INIT_ACTOUT_BIAS = (0.02, 0)
 INIT_VOUT_COE = (0, 1)
 INIT_VOUT_BIAS = (0.02, 0)
-INIT_L = (0, 1)
+INIT_L_COE = (0, 1)
+INIT_L_BIAS = (0, 1)
 
 # RL
 INIT_STDDEV = 0.67
@@ -30,7 +31,7 @@ EPISODE = 10000
 STEP = 200
 REPLAY_SIZE = 10000
 BATCH_SIZE = 128
-REWARD_ADDITION = 10
+REWARD_ADDITION = 5
 
 # Test
 TEST_INTERVAL = 100
@@ -53,36 +54,39 @@ class Net:
         for i in range(len(HID_DIMS)):
             layerBefore = cls._genLayer('layer' + str(i), layerBefore, HID_DIMS[i], INIT_HID_COE[i], INIT_HID_BIAS[i], True)
         cls.actOut = cls._genLayer('actOut', layerBefore, actDim, INIT_ACTOUT_COE, INIT_ACTOUT_BIAS, False)
-        cls.VOut = tf.reduce_sum(cls._genLayer('VOut', layerBefore, 1, INIT_VOUT_COE, INIT_VOUT_BIAS, False), 1)
+        cls.VOut = tf.reshape(cls._genLayer('VOut', layerBefore, 1, INIT_VOUT_COE, INIT_VOUT_BIAS, False), (-1, ))
+        LEle = cls._genLayer('LEle', layerBefore, actDim * actDim, INIT_L_COE, INIT_L_BIAS, False) # Redundant elements will not be calculated
         del layerBefore
 
         cls.actIn = tf.placeholder(tf.float32, (None, actDim), name = 'actIn')
 
         with tf.name_scope('alpha'):
-            alpha = cls.actIn - cls.actOut
+            alpha = tf.reshape(cls.actIn - cls.actOut, (-1, 1, actDim))
 
         with tf.name_scope('L'):
-            def genLElement(i, j):
-                if j > i:
-                    return tf.constant(0, tf.float32)
-                var = tf.Variable(tf.truncated_normal((), INIT_L[0], INIT_L[1]))
-                if i == j:
-                    var = tf.nn.softplus(var)
-                return var
-            L = [[genLElement(i, j) for j in range(actDim)] for i in range(actDim)]
+            sqr = tf.reshape(LEle, (-1, actDim, actDim))
+            lower = tf.matrix_band_part(sqr, -1, 0)
+            diag = tf.matrix_band_part(sqr, 0, 0)
+            posiDiag = tf.matrix_band_part(tf.nn.softplus(sqr), 0, 0)
+            L = lower - diag + posiDiag
             tf.summary.histogram('histogram', L)
-            del genLElement
+            del LEle
+            del sqr
+            del lower
+            del diag
+            del posiDiag
 
         with tf.name_scope('P'):
-            P = tf.matmul(L, tf.transpose(L))
+            P = tf.matmul(L, L, transpose_b = True)
             tf.summary.histogram('histogram', P)
 
         with tf.name_scope('A'):
-            A = tf.reduce_sum(tf.matmul(alpha, P) * alpha, 1) # The last multiplication is not matmul
+            A = tf.reshape(tf.matmul(tf.matmul(alpha, P), alpha, transpose_b = True), (-1, ))
             tf.summary.histogram('histogram', A)
+            del alpha
 
         with tf.name_scope('Q'):
-            cls.QOut = -A + cls.VOut
+            cls.QOut = cls.VOut - A
             tf.summary.histogram('histogram', cls.QOut)
 
         with tf.name_scope('loss'):
@@ -189,7 +193,7 @@ class Agent:
             @param completeness : current episode / total episode number '''
 
         opt = self.optAction()
-        disturb = lambda x: min(1.0, max(0.0, random.normalvariate(x, INIT_STDDEV + (FINAL_STDDEV - INIT_STDDEV) * completeness)))
+        disturb = lambda x: random.normalvariate(x, INIT_STDDEV + (FINAL_STDDEV - INIT_STDDEV) * completeness)
         ret = list(map(disturb, opt))
         return ret
 
@@ -218,7 +222,7 @@ class Agent:
             @return : (Reward gained, Whether done) '''
         
         sigmoid = lambda x: 1.0 / (1.0 + math.exp(-x))
-        newState, reward, done, _ = self.env.step((2.0 * sigmoid(action[0] / 3) * (1 if random.random() < sigmoid(action[1] * 3) else -1), ))
+        newState, reward, done, _ = self.env.step((2.0 * sigmoid(action[0]) * (1 if random.random() < sigmoid(action[1] * 3) else -1), ))
         if perceive:
             self.perceive(self.state, action, newState, REWARD_ADDITION + reward, done)
         self.state = newState
